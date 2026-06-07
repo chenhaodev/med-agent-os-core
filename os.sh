@@ -141,17 +141,11 @@ PYEOF
 
     local t_start; t_start=$(now_ms)
 
-    # ── turn index ─────────────────────────────────────────────────────────────
-    local turn_index
-    turn_index=$(python3 -c "
-import sqlite3, sys
-conn=sqlite3.connect(sys.argv[1])
-row=conn.execute('SELECT COALESCE(MAX(turn_index),0)+1 FROM turns WHERE session_id=?',(sys.argv[2],)).fetchone()
-print(row[0])
-conn.close()
-" "$OS_DB" "$session_id")
-
-    local turn_id="t-$(gen_uuid)"
+    # ── turn index + id (atomic reserve — no race between concurrent turns) ────
+    local _reserve turn_index turn_id
+    _reserve=$(reserve_turn "$session_id" "$mode")
+    turn_index=$(echo "$_reserve" | cut -f1)
+    turn_id=$(echo "$_reserve" | cut -f2)
 
     # ── stage 0: prefilter ─────────────────────────────────────────────────────
     local pf_result
@@ -166,13 +160,13 @@ conn.close()
         fi
 
         if [[ "$dry_run" == "false" ]]; then
-            # persist prefilter turn async
+            # persist prefilter turn async; errors go to persist.err (not /dev/null)
             (
                 OS_SESSION_ID="$session_id"
                 persist_turn "$turn_id" "$turn_index" "$message" "$pf_result" \
                              "" "[]" "{\"reply\":\"$pf_reply\",\"profile_delta\":[],\"status\":\"ok\"}" \
-                             "$(($(now_ms)-t_start))" "$mode" &
-            ) 2>/dev/null || true
+                             "$(($(now_ms)-t_start))" "$mode"
+            ) 2>>"$OS_LOGS_DIR/persist.err" &
         fi
 
         echo "$pf_reply"
@@ -229,7 +223,7 @@ conn.close()
     (
         persist_turn "$turn_id" "$turn_index" "$message" "pass" \
                      "$ast_json" "$results_json" "$synth_json" "$total_ms" "$mode"
-    ) &
+    ) 2>>"$OS_LOGS_DIR/persist.err" &
 
     # fast-path: synthesize didn't extract profile_delta (skipped LLM merge),
     # so extract profile facts from the reply in background

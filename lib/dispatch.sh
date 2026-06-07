@@ -74,17 +74,16 @@ bounded_fanout() {
     local idx=0
 
     while [[ $idx -lt $node_count ]]; do
-        # wait if at capacity
+        # wait if at capacity; recompute active from live pids to avoid drift
         while [[ $active -ge $max_workers ]]; do
             local new_pids=()
-            for pid in "${pids[@]}"; do
+            for pid in ${pids[@]+"${pids[@]}"}; do
                 if kill -0 "$pid" 2>/dev/null; then
                     new_pids+=("$pid")
-                else
-                    (( active-- )) || true
                 fi
             done
-            pids=("${new_pids[@]}")
+            pids=(${new_pids[@]+"${new_pids[@]}"})
+            active=${#pids[@]}
             [[ $active -ge $max_workers ]] && sleep 0.1
         done
 
@@ -93,12 +92,12 @@ bounded_fanout() {
 
         dispatch_intent "$node_json" "$rundir" &
         pids+=($!)
-        (( active++ )) || true
+        active=${#pids[@]}
         (( idx++ )) || true
     done
 
     # wait for all remaining
-    for pid in "${pids[@]}"; do
+    for pid in ${pids[@]+"${pids[@]}"}; do
         wait "$pid" 2>/dev/null || true
     done
 }

@@ -12,6 +12,50 @@ BASE_DIR="$(dirname "$STAGE_DIR")"
 
 source "$BASE_DIR/lib/common.sh"
 
+# ── reserve_turn(session_id, mode) ───────────────────────────────────────────
+# Atomically allocate turn_index and insert a pending turn skeleton in one
+# BEGIN IMMEDIATE transaction — SQLite serialises all IMMEDIATE writers so two
+# concurrent callers can never read the same MAX+1.
+# Prints "turn_index<TAB>turn_id" to stdout.
+reserve_turn() {
+    local session_id="$1"
+    local mode="${2:-patient}"
+
+    python3 - "$OS_DB" "$session_id" "$mode" <<'PYEOF'
+import sqlite3, sys, uuid
+from datetime import datetime, timezone
+
+db, session_id, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+turn_id = "t-" + str(uuid.uuid4())
+
+conn = sqlite3.connect(db, timeout=10)
+conn.execute("PRAGMA journal_mode=WAL")
+conn.execute("PRAGMA foreign_keys=ON")
+try:
+    conn.execute("BEGIN IMMEDIATE")
+    row = conn.execute(
+        "SELECT COALESCE(MAX(turn_index),0)+1 FROM turns WHERE session_id=?",
+        (session_id,)
+    ).fetchone()
+    turn_index = row[0]
+    conn.execute("""
+        INSERT INTO turns
+            (turn_id, session_id, turn_index, user_message, prefilter,
+             decompose_json, reply, status, total_ms, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (turn_id, session_id, turn_index, "", "", "", "", "pending", 0, now))
+    conn.commit()
+    print(f"{turn_index}\t{turn_id}")
+finally:
+    conn.close()
+PYEOF
+}
+
+# ── persist_turn(turn_id, turn_index, user_message, prefilter_result, ────────
+#                ast_json, results_json, synth_json, total_ms, mode)
+# Updates the pending skeleton row created by reserve_turn and inserts all
+# child rows (messages, agent_calls, profile_facts) in one transaction.
 persist_turn() {
     local turn_id="$1"
     local turn_index="$2"
@@ -36,7 +80,7 @@ persist_turn() {
         "$total_ms" \
         "$mode" \
         <<'PYEOF'
-import json, sqlite3, sys
+import json, sqlite3, sys, traceback
 from datetime import datetime, timezone
 
 db_path      = sys.argv[1]
@@ -66,14 +110,12 @@ conn.execute("PRAGMA foreign_keys=ON")
 try:
     conn.execute("BEGIN IMMEDIATE")
 
-    # 1. turn row
+    # 1. fill in the pending turn skeleton created by reserve_turn
     conn.execute("""
-        INSERT OR REPLACE INTO turns
-            (turn_id, session_id, turn_index, user_message, prefilter,
-             decompose_json, reply, status, total_ms, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (turn_id, session_id, turn_index, user_message, prefilter,
-          ast_json_str, reply, status, total_ms, now))
+        UPDATE turns SET
+            user_message=?, prefilter=?, decompose_json=?, reply=?, status=?, total_ms=?
+        WHERE turn_id=?
+    """, (user_message, prefilter, ast_json_str, reply, status, total_ms, turn_id))
 
     # 2. user message row
     import uuid
@@ -149,6 +191,11 @@ try:
     conn.commit()
 except Exception as e:
     conn.rollback()
+    print(
+        f"[persist_error] turn_id={turn_id} session={session_id} err={e}\n"
+        f"{traceback.format_exc()}",
+        file=sys.stderr,
+    )
     raise
 finally:
     conn.close()

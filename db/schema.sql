@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS turns (
     prefilter     TEXT,                       -- 'pass' | 'oob' | 'chitchat'
     decompose_json TEXT,                      -- full AST JSON as produced
     reply         TEXT,
-    status        TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','partial','error')),
+    status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('ok','partial','error','pending')),
     total_ms      INTEGER,
     created_at    TEXT NOT NULL
 );
