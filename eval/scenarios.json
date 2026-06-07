@@ -1,0 +1,110 @@
+{
+  "scenarios": [
+    {
+      "name": "prefilter_chitchat",
+      "desc": "Chitchat is intercepted before dispatch",
+      "mode": "patient",
+      "message": "你好，你能做什么？",
+      "expect_prefilter": "chitchat",
+      "expect_no_dispatch": true,
+      "expect_contains": "医学信息助手"
+    },
+    {
+      "name": "prefilter_oob",
+      "desc": "Non-medical OOB intercepted before dispatch",
+      "mode": "patient",
+      "message": "帮我看下今天的天气预报",
+      "expect_prefilter": "oob",
+      "expect_no_dispatch": true,
+      "expect_contains": "不在医学信息服务范围"
+    },
+    {
+      "name": "single_intent_dispatch",
+      "desc": "Single medical question dispatched and answered",
+      "mode": "patient",
+      "message": "高血压患者每天盐的摄入量要控制在多少克以内？",
+      "expect_node_count": 1,
+      "expect_fast_path": true,
+      "requires_api": true
+    },
+    {
+      "name": "single_intent_doctor",
+      "desc": "Doctor mode single-intent",
+      "mode": "doctor",
+      "message": "高血压合并CKD3期，ACEI和ARB哪个首选？",
+      "expect_node_count": 1,
+      "expect_fast_path": true,
+      "requires_api": true
+    },
+    {
+      "name": "multi_intent_basic",
+      "desc": "Conjunction triggers decompose → multiple sub-intents",
+      "mode": "patient",
+      "message": "我爸高血压，饮食要注意什么？另外他能喝酒吗？",
+      "expect_multi_intent": true,
+      "requires_api": true
+    },
+    {
+      "name": "multi_intent_bypass_2tag_limit",
+      "desc": "Three domains bypasses inner-all 2-tag cap",
+      "mode": "patient",
+      "message": "我爸有高血压、糖尿病、还有痛风，请分别说说饮食注意和用药禁忌",
+      "expect_node_count_gte": 3,
+      "requires_api": true
+    },
+    {
+      "name": "multi_turn_coreference",
+      "desc": "Second turn uses profile to resolve pronoun",
+      "mode": "patient",
+      "messages": [
+        "我爸有高血压，今年68岁",
+        "他能喝咖啡吗？"
+      ],
+      "expect_profile_facts_gte": 1,
+      "expect_second_turn_contains": "高血压",
+      "requires_api": true
+    },
+    {
+      "name": "profile_accumulation",
+      "desc": "Profile facts accumulate across turns",
+      "mode": "patient",
+      "messages": [
+        "我爸高血压",
+        "他还有2型糖尿病"
+      ],
+      "expect_profile_facts_gte": 2,
+      "requires_api": true
+    },
+    {
+      "name": "oob_mixed",
+      "desc": "Medical + OOB sub-intents → partial turn",
+      "mode": "patient",
+      "message": "高血压饮食注意啥？另外帮我推荐个股票",
+      "expect_status": "partial",
+      "requires_api": true
+    },
+    {
+      "name": "cache_hit",
+      "desc": "Second identical call hits cache (no dispatch)",
+      "mode": "patient",
+      "message": "高血压患者能吃什么水果？",
+      "repeat": 2,
+      "expect_cache_hit": true,
+      "requires_api": true
+    },
+    {
+      "name": "dual_mode_patient",
+      "desc": "Patient mode returns plain-language reply",
+      "mode": "patient",
+      "message": "心力衰竭患者每天能喝多少水？",
+      "requires_api": true
+    },
+    {
+      "name": "dual_mode_doctor",
+      "desc": "Doctor mode returns structured clinical reply",
+      "mode": "doctor",
+      "message": "心力衰竭患者液体摄入量的临床管理原则",
+      "requires_api": true
+    }
+  ]
+}
