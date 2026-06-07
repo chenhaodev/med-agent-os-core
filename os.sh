@@ -173,7 +173,7 @@ PYEOF
             (
                 OS_SESSION_ID="$session_id"
                 persist_turn "$turn_id" "$turn_index" "$message" "$pf_result" \
-                             "" "[]" "{\"reply\":\"$pf_reply\",\"profile_delta\":[],\"status\":\"ok\"}" \
+                             "" "[]" "{\"reply\":$pf_reply_json,\"profile_delta\":[],\"status\":\"ok\"}" \
                              "$(($(now_ms)-t_start))" "$mode"
             ) 2>>"$OS_LOGS_DIR/persist.err" &
         fi
@@ -887,13 +887,14 @@ _cmd_serve() {
     trap "rm -f '$_srv_tmp'" EXIT INT TERM
 
     cat > "$_srv_tmp" <<'PYEOF'
-import json, os, subprocess, sys
+import json, os, subprocess, sys, threading
 
 base_dir = sys.argv[1]
 os_db    = sys.argv[2]
 os_sh    = os.path.join(base_dir, "os.sh")
 
 _active = {}  # request_id → subprocess
+_SERVE_TIMEOUT = int(os.environ.get("OS_SERVE_TIMEOUT", "120"))
 
 def send(obj):
     print(json.dumps(obj, ensure_ascii=False), flush=True)
@@ -946,6 +947,8 @@ def handle_chat(id, p):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     _active[id] = proc
     final = None
+    _timer = threading.Timer(_SERVE_TIMEOUT, proc.terminate)
+    _timer.start()
     try:
         for line in proc.stdout:
             line = line.rstrip()
@@ -953,14 +956,14 @@ def handle_chat(id, p):
                 continue
             try:
                 event = json.loads(line)
+                notify(id, event)
                 if event.get("type") == "run_end":
                     final = event
-                else:
-                    notify(id, event)
             except Exception:
                 pass
         proc.wait()
     finally:
+        _timer.cancel()
         _active.pop(id, None)
 
     if final:

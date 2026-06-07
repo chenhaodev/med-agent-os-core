@@ -345,11 +345,17 @@ EOF
 
     # ── contract assertions (F1-F4 invariants焊死) ───────────────────────────────
 
-    if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_json_ndjson" ]]; then
-        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
-        raw=$(bash "$BASE_DIR/os.sh" chat --json --session "$SID" --mode patient \
+    # Shared pipeline run for json/reply/dispatch contract tests (avoids 3 separate invocations)
+    _contract_raw=""
+    if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_json_ndjson" || \
+          "$SCENARIO" == "contract_reply_in_stream" || "$SCENARIO" == "contract_dispatch_pairing" ]]; then
+        _contract_sid=$(bash "$BASE_DIR/os.sh" session new --mode patient)
+        _contract_raw=$(bash "$BASE_DIR/os.sh" chat --json --session "$_contract_sid" --mode patient \
             "高血压能喝酒吗？" 2>/dev/null)
-        bad_lines=$(echo "$raw" | while IFS= read -r ln; do
+    fi
+
+    if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_json_ndjson" ]]; then
+        bad_lines=$(echo "$_contract_raw" | while IFS= read -r ln; do
             [[ -z "$ln" ]] && continue
             echo "$ln" | python3 -c "import json,sys; json.loads(sys.stdin.read())" 2>/dev/null || echo "BAD"
         done | grep -c "BAD" 2>/dev/null || true)
@@ -361,10 +367,7 @@ EOF
     fi
 
     if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_reply_in_stream" ]]; then
-        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
-        raw=$(bash "$BASE_DIR/os.sh" chat --json --session "$SID" --mode patient \
-            "高血压能喝酒吗？" 2>/dev/null)
-        run_end_reply=$(echo "$raw" | python3 -c "
+        run_end_reply=$(echo "$_contract_raw" | python3 -c "
 import json,sys
 for line in sys.stdin:
     line=line.strip()
@@ -385,10 +388,9 @@ for line in sys.stdin:
     fi
 
     if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_dispatch_pairing" ]]; then
-        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
-        raw=$(bash "$BASE_DIR/os.sh" chat --json --session "$SID" --mode patient \
-            "高血压能喝酒吗？" 2>/dev/null)
-        start_count=$(echo "$raw" | python3 -c "
+        # Counts dispatch_start vs dispatch_end; verifies symmetry for all paths exercised.
+        # Single-intent fast-path is covered here. Multi-intent bounded_fanout is covered by live eval.
+        start_count=$(echo "$_contract_raw" | python3 -c "
 import json,sys; n=0
 for l in sys.stdin:
     l=l.strip()
@@ -399,7 +401,7 @@ for l in sys.stdin:
     except: pass
 print(n)
 " 2>/dev/null || echo "0")
-        end_count=$(echo "$raw" | python3 -c "
+        end_count=$(echo "$_contract_raw" | python3 -c "
 import json,sys; n=0
 for l in sys.stdin:
     l=l.strip()

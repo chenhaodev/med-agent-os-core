@@ -11,7 +11,7 @@
 # synthesize_start— {type}
 # token           — {type, delta} (streaming synthesize)
 # profile_delta   — {type, facts: [{subject,attr,value,confidence,op:add|retract}]}
-# run_end         — {type, status: ok|partial|error, total_ms}
+# run_end         — {type, status: ok|partial|error, total_ms, reply}
 
 # _OS_JSON_EVENTS is set by os.sh when --json is passed
 _OS_JSON_EVENTS="${_OS_JSON_EVENTS:-false}"

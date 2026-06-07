@@ -38,8 +38,18 @@ dispatch_all() {
         dispatch_intent "$node_json" "$rundir"
         local rf="$rundir/intent_${iid}.result.json"
         local d_status d_ms
-        d_status=$(python3 -c "import json,sys; d=json.loads(open(sys.argv[1]).read()); print(d.get('status','ok'))" "$rf" 2>/dev/null || echo "ok")
-        d_ms=$(python3 -c "import json,sys; d=json.loads(open(sys.argv[1]).read()); print(d.get('ms',0))" "$rf" 2>/dev/null || echo "0")
+        if [[ -f "$rf" ]]; then
+            read -r d_status d_ms < <(python3 -c "
+import json,sys
+try:
+    d=json.loads(open(sys.argv[1]).read())
+    print(d.get('status','error'),d.get('ms',0))
+except Exception:
+    print('error',0)
+" "$rf" 2>/dev/null || echo "error 0")
+        else
+            d_status="error"; d_ms="0"
+        fi
         emit_event "dispatch_end" "\"intent_id\":\"$iid\",\"agent_id\":\"$agent_id\",\"status\":\"$d_status\",\"ms\":$d_ms"
     else
         # bounded fan-out — emit per-node start events then parallel dispatch
@@ -64,8 +74,18 @@ for n in nodes: print(json.dumps(n))
             agent_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('agent','inner_all'))" "$node_j")
             local rf="$rundir/intent_${iid}.result.json"
             local d_status d_ms
-            d_status=$(python3 -c "import json,sys; d=json.loads(open(sys.argv[1]).read()); print(d.get('status','ok'))" "$rf" 2>/dev/null || echo "ok")
-            d_ms=$(python3 -c "import json,sys; d=json.loads(open(sys.argv[1]).read()); print(d.get('ms',0))" "$rf" 2>/dev/null || echo "0")
+            if [[ -f "$rf" ]]; then
+                read -r d_status d_ms < <(python3 -c "
+import json,sys
+try:
+    d=json.loads(open(sys.argv[1]).read())
+    print(d.get('status','error'),d.get('ms',0))
+except Exception:
+    print('error',0)
+" "$rf" 2>/dev/null || echo "error 0")
+            else
+                d_status="error"; d_ms="0"
+            fi
             emit_event "dispatch_end" "\"intent_id\":\"$iid\",\"agent_id\":\"$agent_id\",\"status\":\"$d_status\",\"ms\":$d_ms"
         done < <(python3 -c "
 import json,sys
