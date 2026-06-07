@@ -139,6 +139,14 @@ PYEOF
     export OS_REQUEST_ID="r-$(gen_uuid)"
     export OS_NO_CACHE="$no_cache"
 
+    # Anchor fd 3 to current stdout BEFORE any $() captures.
+    # emit_event writes to _OS_EVENTS_FD (fd 3), which survives command substitutions
+    # and keeps events out of captured return values (ast_json, synth_json etc.).
+    if [[ "$_JSON_MODE" == "true" ]]; then
+        exec 3>&1
+        export _OS_EVENTS_FD=3
+    fi
+
     local t_start; t_start=$(now_ms)
 
     # ── turn index + id (atomic reserve — no race between concurrent turns) ────

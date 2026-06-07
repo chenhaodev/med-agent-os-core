@@ -116,19 +116,23 @@ PYEOF
         [[ "$data" == "[DONE]" ]] && break
 
         local delta
-        delta=$(python3 -c "
+        # Pass JSON via stdin to avoid argv quoting issues with special chars.
+        # Use `or ''` to coerce JSON null → empty string (DeepSeek sends null
+        # for role-only chunks at stream start).
+        delta=$(echo "$data" | python3 -c "
 import json,sys
 try:
-    d=json.loads(sys.argv[1])
-    print(d['choices'][0]['delta'].get('content',''),end='')
+    d=json.loads(sys.stdin.read())
+    c=d['choices'][0]['delta'].get('content') or ''
+    print(c,end='')
 except Exception:
     pass
-" "$data" 2>/dev/null)
+" 2>/dev/null)
 
         if [[ -n "$delta" ]]; then
             full_text="${full_text}${delta}"
             local delta_json
-            delta_json=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$delta")
+            delta_json=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$delta")
             emit_event "token" "\"delta\":$delta_json"
             # In plain-CLI mode, write delta directly to terminal (bypasses subshell capture)
             if [[ "${_JSON_MODE:-false}" == "false" ]]; then
