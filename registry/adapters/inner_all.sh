@@ -132,13 +132,19 @@ fi
 ask_args=("--mode" "$INTENT_MODE")
 [[ -n "$valid_domains" ]] && ask_args+=("--domain" "$valid_domains")
 
+# ask.sh uses a hand-rolled parser with no -- support; a question starting with
+# - would be consumed as a flag (--deep triggers expensive mode, --domain injects
+# domains, etc.). Prepend a space so the leading - is no longer in argv[0] position.
+safe_question="$INTENT_QUESTION"
+case "$safe_question" in -*) safe_question=" $safe_question" ;; esac
+
 t_start=$(now_ms)
 raw_stdout=""
 ec=0
 
 set +e
 raw_stdout=$(timeout "$OS_AGENT_TIMEOUT" \
-    "$ASK_SH" "${ask_args[@]}" "$INTENT_QUESTION" 2>"$stderr_file")
+    "$ASK_SH" "${ask_args[@]}" "$safe_question" 2>"$stderr_file")
 ec=$?
 set -e
 
