@@ -115,16 +115,18 @@ _llm_decompose() {
     profile_block=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('profile_block',''))" "$context_json")
 
     local history_text
+    local _hw="${OS_HISTORY_WINDOW:-6}"
     history_text=$(python3 -c "
 import json,sys
 d=json.loads(sys.argv[1])
+window=int(sys.argv[2])
 turns=d.get('history',[])
 lines=[]
-for t in turns[-6:]:
+for t in turns[-window:]:
     role='用户' if t['role']=='user' else '助手'
     lines.append(f'{role}: {t[\"content\"][:200]}')
 print('\n'.join(lines))
-" "$context_json")
+" "$context_json" "$_hw")
 
     local user_content
     user_content="当前消息：${message}

@@ -3,7 +3,7 @@
 # Called by the parent process after reply is delivered; may run async for fast-path.
 # Input env: OS_DB, OS_SESSION_ID
 # Arguments: turn_id, turn_index, user_message, prefilter_result,
-#            ast_json, results_json, synth_json, total_ms
+#            ast_json, results_json, synth_json, total_ms, mode
 
 set -euo pipefail
 
@@ -21,6 +21,7 @@ persist_turn() {
     local results_json="$6"
     local synth_json="$7"
     local total_ms="$8"
+    local mode="${9:-patient}"
 
     python3 - \
         "$OS_DB" \
@@ -33,6 +34,7 @@ persist_turn() {
         "$results_json" \
         "$synth_json" \
         "$total_ms" \
+        "$mode" \
         <<'PYEOF'
 import json, sqlite3, sys
 from datetime import datetime, timezone
@@ -47,6 +49,7 @@ ast_json_str = sys.argv[7]
 results_str  = sys.argv[8]
 synth_str    = sys.argv[9]
 total_ms     = int(sys.argv[10])
+mode         = sys.argv[11]
 
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
@@ -78,14 +81,14 @@ try:
         INSERT OR IGNORE INTO messages
             (message_id, session_id, turn_index, role, mode, content, created_at)
         VALUES (?,?,?,?,?,?,?)
-    """, (str(uuid.uuid4()), session_id, turn_index, "user", "patient", user_message, now))
+    """, (str(uuid.uuid4()), session_id, turn_index, "user", mode, user_message, now))
 
     # 3. assistant message row
     conn.execute("""
         INSERT OR IGNORE INTO messages
             (message_id, session_id, turn_index, role, mode, content, created_at)
         VALUES (?,?,?,?,?,?,?)
-    """, (str(uuid.uuid4()), session_id, turn_index, "assistant", "patient", reply, now))
+    """, (str(uuid.uuid4()), session_id, turn_index, "assistant", mode, reply, now))
 
     # 4. agent_calls
     try:
@@ -120,7 +123,7 @@ try:
         subject = fact.get("subject", "")
         attr    = fact.get("attr", "")
         value   = fact.get("value", "")
-        conf    = float(fact.get("confidence", 1.0))
+        conf    = float(fact.get("confidence", 0.9))
 
         if op == "add" and subject and attr and value:
             conn.execute("""

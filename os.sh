@@ -90,8 +90,8 @@ _cmd_chat() {
     local i=0
     while [[ $i -lt ${#args[@]} ]]; do
         case "${args[$i]}" in
-            --session) (( i++ )); session_id="${args[$i]}" ;;
-            --mode)    (( i++ )); mode="${args[$i]}" ;;
+            --session) (( i++ )) || true; session_id="${args[$i]}" ;;
+            --mode)    (( i++ )) || true; mode="${args[$i]}" ;;
             --no-cache) no_cache=true ;;
             --dry-run)  dry_run=true ;;
             *)
@@ -171,7 +171,7 @@ conn.close()
                 OS_SESSION_ID="$session_id"
                 persist_turn "$turn_id" "$turn_index" "$message" "$pf_result" \
                              "" "[]" "{\"reply\":\"$pf_reply\",\"profile_delta\":[],\"status\":\"ok\"}" \
-                             "$(($(now_ms)-t_start))" &
+                             "$(($(now_ms)-t_start))" "$mode" &
             ) 2>/dev/null || true
         fi
 
@@ -228,7 +228,7 @@ conn.close()
     # ── stage 5: persist + async profile extraction ────────────────────────────
     (
         persist_turn "$turn_id" "$turn_index" "$message" "pass" \
-                     "$ast_json" "$results_json" "$synth_json" "$total_ms"
+                     "$ast_json" "$results_json" "$synth_json" "$total_ms" "$mode"
     ) &
 
     # fast-path: synthesize didn't extract profile_delta (skipped LLM merge),
@@ -259,8 +259,8 @@ _cmd_plan() {
     local i=0
     while [[ $i -lt ${#args[@]} ]]; do
         case "${args[$i]}" in
-            --session) (( i++ )); session_id="${args[$i]}" ;;
-            --mode)    (( i++ )); mode="${args[$i]}" ;;
+            --session) (( i++ )) || true; session_id="${args[$i]}" ;;
+            --mode)    (( i++ )) || true; mode="${args[$i]}" ;;
             *)         [[ -z "$message" ]] && message="${args[$i]}" ;;
         esac
         (( i++ )) || true

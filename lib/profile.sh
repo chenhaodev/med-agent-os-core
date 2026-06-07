@@ -62,7 +62,7 @@ for f in facts:
     subj = str(f.get("subject","")).strip()
     attr = str(f.get("attr","")).strip()
     val  = str(f.get("value","")).strip()
-    conf = float(f.get("confidence",0.8))
+    conf = float(f.get("confidence",0.9))
     if not (subj and attr and val): continue
     if attr not in VALID_ATTRS: continue
     if op == "add":

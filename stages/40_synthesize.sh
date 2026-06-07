@@ -77,7 +77,7 @@ ${sub_answers_text}"
     emit_event "synthesize_start" ""
 
     local raw_response
-    if ! raw_response=$(llm_call "$system_prompt" "$user_content" 0.3); then
+    if ! raw_response=$(llm_call "$system_prompt" "$user_content" "${OS_SYNTHESIZE_TEMP:-0.3}"); then
         log_error "synthesize: LLM call failed"
         return 1
     fi

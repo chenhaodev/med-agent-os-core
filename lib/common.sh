@@ -73,5 +73,5 @@ json_escape() {
 
 # ── sha256 of concatenated args ───────────────────────────────────────────────
 sha256_args() {
-    python3 -c "import hashlib,sys; print(hashlib.sha256(''.join(sys.argv[1:]).encode()).hexdigest())" -- "$@"
+    python3 -c "import hashlib,sys; print(hashlib.sha256(''.join(sys.argv[1:]).encode()).hexdigest())" "$@"
 }
