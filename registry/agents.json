@@ -1,0 +1,14 @@
+{
+  "agents": [
+    {
+      "id": "inner_all",
+      "display_name": "医学通识专家 (inner-all)",
+      "adapter": "adapters/inner_all.sh",
+      "modes": ["patient", "doctor"],
+      "domains_file": "inner_all_domains.txt",
+      "timeout": 90,
+      "enabled": true,
+      "notes": "Wraps med-agent-inner-all/bin/ask.sh. Covers all specialties in knowledge/. Pass --domain to bypass router and exceed 2-tag cap."
+    }
+  ]
+}

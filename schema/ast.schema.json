@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "med-agent-os-core/ast/v1",
+  "title": "Request AST — intent plan produced by decompose stage",
+  "version": 1,
+  "type": "object",
+  "required": ["v", "request_id", "session", "mode", "raw", "context_ref", "plan"],
+  "properties": {
+    "v":          { "type": "integer", "const": 1 },
+    "request_id": { "type": "string" },
+    "session":    { "type": "string" },
+    "mode":       { "type": "string", "enum": ["patient", "doctor"] },
+    "raw":        { "type": "string", "description": "Original user message, unmodified" },
+    "context_ref": {
+      "type": "object",
+      "properties": {
+        "history_turns": { "type": "integer" },
+        "profile_facts":  { "type": "integer" }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "required": ["op", "nodes"],
+      "properties": {
+        "op": { "type": "string", "enum": ["parallel", "sequence"] },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/Node" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "Node": {
+      "type": "object",
+      "required": ["id", "kind", "agent", "mode", "question", "domains"],
+      "properties": {
+        "id":      { "type": "string" },
+        "kind":    { "type": "string", "enum": ["medical_query", "oob", "chitchat", "meta", "clarify"] },
+        "agent":   { "type": "string", "description": "Agent id or 'none' for OS-handled nodes" },
+        "mode":    { "type": "string", "enum": ["patient", "doctor"] },
+        "question":{ "type": "string", "description": "Self-contained, co-reference-resolved question" },
+        "domains": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z_]+:[a-z_]+$" }
+        },
+        "subject":    { "type": "string", "description": "Profile subject this node relates to" },
+        "depends_on": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "deep":       { "type": "boolean", "default": false }
+      }
+    },
+    "NodeResult": {
+      "type": "object",
+      "required": ["id", "status"],
+      "properties": {
+        "id":       { "type": "string" },
+        "status":   { "type": "string", "enum": ["ok", "oob", "error", "timeout"] },
+        "answer":   { "type": ["string", "null"] },
+        "citations":{ "type": "array", "items": { "type": "string" } },
+        "ms":       { "type": "integer" },
+        "exit_code":{ "type": "integer" }
+      }
+    }
+  }
+}

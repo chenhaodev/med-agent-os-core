@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Mock adapter for eval/testing — returns canned ═══-wrapped responses without calling ask.sh.
+# Reads mock fixture from eval/mock/fixtures/<INTENT_ID>.txt if it exists,
+# otherwise returns a generic placeholder answer.
+#
+# Uses same env contract as adapters/inner_all.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+source "$BASE_DIR/lib/common.sh"
+source "$BASE_DIR/lib/unwrap.sh"
+
+FENCE="═══════════════════════════════════════════════════════"
+FIXTURES_DIR="$SCRIPT_DIR/fixtures"
+
+result_file="$RUNDIR/intent_${INTENT_ID}.result.json"
+
+t_start=$(now_ms)
+
+# Try specific fixture, fall back to generic
+fixture_file="$FIXTURES_DIR/${INTENT_ID}.txt"
+if [[ ! -f "$fixture_file" ]]; then
+    fixture_file="$FIXTURES_DIR/default.txt"
+fi
+
+if [[ -f "$fixture_file" ]]; then
+    raw_stdout=$(cat "$fixture_file")
+else
+    # generic placeholder
+    raw_stdout="
+$FENCE
+【模拟回答】针对问题「${INTENT_QUESTION}」的占位答案。
+本回答为测试用途，仅验证管线流转。
+$FENCE
+"
+fi
+
+t_end=$(now_ms)
+elapsed=$(( t_end - t_start ))
+
+unwrap_out=$(unwrap "$raw_stdout")
+unwrap_status=$(echo "$unwrap_out" | head -1)
+answer=$(echo "$unwrap_out" | tail -n +2)
+
+case "$unwrap_status" in
+    ok)           status="ok" ;;
+    oob)          status="oob" ;;
+    *)            status="error" ;;
+esac
+
+python3 - "$INTENT_ID" "$status" "$answer" "$elapsed" > "$result_file" <<'PYEOF'
+import json, sys
+print(json.dumps({
+    "id":        sys.argv[1],
+    "status":    sys.argv[2],
+    "answer":    sys.argv[3] if sys.argv[2] == "ok" else None,
+    "citations": [],
+    "ms":        int(sys.argv[4]),
+    "exit_code": 0,
+}, ensure_ascii=False))
+PYEOF
+
+log_debug "mock_inner_all[$INTENT_ID] status=$status ms=$elapsed"
+exit 0

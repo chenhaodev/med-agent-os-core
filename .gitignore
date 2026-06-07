@@ -1,0 +1,6 @@
+var/
+.env
+*.swp
+*.orig
+__pycache__/
+*.pyc
