@@ -161,10 +161,11 @@ PYEOF
     emit_event "prefilter" "\"result\":\"$pf_result\""
 
     if [[ "$pf_result" != "pass" ]]; then
-        local pf_reply
+        local pf_reply pf_reply_json
         pf_reply=$(prefilter_reply "$pf_result" "$mode")
+        pf_reply_json=$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$pf_reply")
         if [[ "$_JSON_MODE" == "true" ]]; then
-            emit_event "run_end" "\"status\":\"ok\",\"total_ms\":$(($(now_ms)-t_start))"
+            emit_event "run_end" "\"status\":\"ok\",\"total_ms\":$(($(now_ms)-t_start)),\"reply\":$pf_reply_json"
         fi
 
         if [[ "$dry_run" == "false" ]]; then
@@ -177,7 +178,9 @@ PYEOF
             ) 2>>"$OS_LOGS_DIR/persist.err" &
         fi
 
-        echo "$pf_reply"
+        if [[ "$_JSON_MODE" == "false" ]]; then
+            echo "$pf_reply"
+        fi
         exit 0
     fi
 
@@ -220,7 +223,9 @@ PYEOF
         emit_event "profile_delta" "\"facts\":$profile_delta_json"
     fi
 
-    emit_event "run_end" "\"status\":\"$status\",\"total_ms\":$total_ms"
+    local reply_json
+    reply_json=$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$reply")
+    emit_event "run_end" "\"status\":\"$status\",\"total_ms\":$total_ms,\"reply\":$reply_json"
 
     # ── output reply ───────────────────────────────────────────────────────────
     if [[ "$_JSON_MODE" == "false" ]]; then
@@ -960,8 +965,9 @@ def handle_chat(id, p):
 
     if final:
         ok(id, {
-            "status":   final.get("status", final.get("data", {}).get("status", "ok")),
-            "total_ms": final.get("total_ms", final.get("data", {}).get("total_ms", 0)),
+            "status":   final.get("status", "ok"),
+            "total_ms": final.get("total_ms", 0),
+            "reply":    final.get("reply", ""),
         })
     else:
         err(id, -32000, "no run_end event from chat subprocess")

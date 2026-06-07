@@ -343,6 +343,120 @@ EOF
         fi
     fi
 
+    # ── contract assertions (F1-F4 invariants焊死) ───────────────────────────────
+
+    if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_json_ndjson" ]]; then
+        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
+        raw=$(bash "$BASE_DIR/os.sh" chat --json --session "$SID" --mode patient \
+            "高血压能喝酒吗？" 2>/dev/null)
+        bad_lines=$(echo "$raw" | while IFS= read -r ln; do
+            [[ -z "$ln" ]] && continue
+            echo "$ln" | python3 -c "import json,sys; json.loads(sys.stdin.read())" 2>/dev/null || echo "BAD"
+        done | grep -c "BAD" 2>/dev/null || true)
+        if [[ "$bad_lines" -eq 0 ]]; then
+            _pass "contract_json_ndjson"
+        else
+            _fail "contract_json_ndjson" "stdout has $bad_lines non-JSON line(s) in --json mode"
+        fi
+    fi
+
+    if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_reply_in_stream" ]]; then
+        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
+        raw=$(bash "$BASE_DIR/os.sh" chat --json --session "$SID" --mode patient \
+            "高血压能喝酒吗？" 2>/dev/null)
+        run_end_reply=$(echo "$raw" | python3 -c "
+import json,sys
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try:
+        ev=json.loads(line)
+        if ev.get('type')=='run_end':
+            print(ev.get('reply',''))
+            sys.exit(0)
+    except Exception:
+        pass
+" 2>/dev/null || true)
+        if [[ -n "$run_end_reply" ]]; then
+            _pass "contract_reply_in_stream"
+        else
+            _fail "contract_reply_in_stream" "run_end.reply is empty or missing in --json stream"
+        fi
+    fi
+
+    if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_dispatch_pairing" ]]; then
+        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
+        raw=$(bash "$BASE_DIR/os.sh" chat --json --session "$SID" --mode patient \
+            "高血压能喝酒吗？" 2>/dev/null)
+        start_count=$(echo "$raw" | python3 -c "
+import json,sys; n=0
+for l in sys.stdin:
+    l=l.strip()
+    if not l: continue
+    try:
+        ev=json.loads(l)
+        if ev.get('type')=='dispatch_start': n+=1
+    except: pass
+print(n)
+" 2>/dev/null || echo "0")
+        end_count=$(echo "$raw" | python3 -c "
+import json,sys; n=0
+for l in sys.stdin:
+    l=l.strip()
+    if not l: continue
+    try:
+        ev=json.loads(l)
+        if ev.get('type')=='dispatch_end': n+=1
+    except: pass
+print(n)
+" 2>/dev/null || echo "0")
+        if [[ "$start_count" -eq "$end_count" && "$start_count" -gt 0 ]]; then
+            _pass "contract_dispatch_pairing"
+        else
+            _fail "contract_dispatch_pairing" "dispatch_start=$start_count dispatch_end=$end_count (must be equal and >0)"
+        fi
+    fi
+
+    if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_prefilter_ndjson" ]]; then
+        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
+        raw=$(bash "$BASE_DIR/os.sh" chat --json --session "$SID" --mode patient \
+            "你好" 2>/dev/null)
+        bad_lines=$(echo "$raw" | while IFS= read -r ln; do
+            [[ -z "$ln" ]] && continue
+            echo "$ln" | python3 -c "import json,sys; json.loads(sys.stdin.read())" 2>/dev/null || echo "BAD"
+        done | grep -c "BAD" 2>/dev/null || true)
+        if [[ "$bad_lines" -eq 0 ]]; then
+            _pass "contract_prefilter_ndjson"
+        else
+            _fail "contract_prefilter_ndjson" "prefilter path has $bad_lines non-JSON line(s) in --json mode"
+        fi
+    fi
+
+    if [[ -z "$SCENARIO" || "$SCENARIO" == "contract_serve_reply" ]]; then
+        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
+        serve_out=$(printf \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"chat","params":{"session_id":"%s","mode":"patient","message":"高血压能喝酒吗？"}}\n' \
+            "$SID" | bash "$BASE_DIR/os.sh" serve 2>/dev/null)
+        serve_reply=$(echo "$serve_out" | python3 -c "
+import json,sys
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try:
+        r=json.loads(line)
+        if r.get('id')==2 and 'result' in r:
+            print(r['result'].get('reply',''))
+            sys.exit(0)
+    except Exception:
+        pass
+" 2>/dev/null || true)
+        if [[ -n "$serve_reply" ]]; then
+            _pass "contract_serve_reply"
+        else
+            _fail "contract_serve_reply" "serve chat result.reply is empty or missing"
+        fi
+    fi
+
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
     [[ $FAIL -eq 0 ]] && exit 0 || exit 1
