@@ -77,7 +77,12 @@ ${sub_answers_text}"
     emit_event "synthesize_start" ""
 
     local raw_response
-    if ! raw_response=$(llm_call "$system_prompt" "$user_content" "${OS_SYNTHESIZE_TEMP:-0.3}"); then
+    if [[ "${OS_STREAM:-false}" == "true" ]]; then
+        if ! raw_response=$(llm_call_stream "$system_prompt" "$user_content" "${OS_SYNTHESIZE_TEMP:-0.3}"); then
+            log_error "synthesize: streaming LLM call failed"
+            return 1
+        fi
+    elif ! raw_response=$(llm_call "$system_prompt" "$user_content" "${OS_SYNTHESIZE_TEMP:-0.3}"); then
         log_error "synthesize: LLM call failed"
         return 1
     fi

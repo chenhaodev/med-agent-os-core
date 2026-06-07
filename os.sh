@@ -854,19 +854,194 @@ _cmd_eval() {
     local action="${1:-list}"; shift || true
     case "$action" in
         run)  bash "$BASE_DIR/eval/run_eval.sh" "$@" ;;
-        list) ls "$BASE_DIR/eval/scenarios.yaml" 2>/dev/null || echo "no scenarios" ;;
-        show) cat "$BASE_DIR/eval/scenarios.yaml" 2>/dev/null || echo "no scenarios" ;;
+        list) ls "$BASE_DIR/eval/scenarios.json" "$BASE_DIR/eval/scenarios.yaml" 2>/dev/null || echo "no scenarios" ;;
+        show) cat "$BASE_DIR/eval/scenarios.json" 2>/dev/null || cat "$BASE_DIR/eval/scenarios.yaml" 2>/dev/null || echo "no scenarios" ;;
         *)    log_error "eval: unknown action '$action'"; exit 2 ;;
     esac
 }
 
 # ════════════════════════════════════════════════════════════════════════════════
-# SERVE (placeholder)
+# SERVE — stdio NDJSON JSON-RPC 2.0 daemon
+# Each request: one JSON object per line → one response per line
+# Notifications use method "$/progress"
 # ════════════════════════════════════════════════════════════════════════════════
 _cmd_serve() {
-    log_error "serve (LSP JSON-RPC daemon) is not yet implemented in MVP."
-    echo "Schema is defined in schema/ast.schema.json"
-    exit 2
+    [[ ! -f "$OS_DB" ]] && bash "$BASE_DIR/db/migrate.sh" >&2
+
+    # Write serve loop to a temp file so python3's stdin stays connected to the caller
+    local _srv_tmp
+    _srv_tmp=$(mktemp /tmp/os_serve_XXXXXX.py)
+    trap "rm -f '$_srv_tmp'" EXIT INT TERM
+
+    cat > "$_srv_tmp" <<'PYEOF'
+import json, os, subprocess, sys
+
+base_dir = sys.argv[1]
+os_db    = sys.argv[2]
+os_sh    = os.path.join(base_dir, "os.sh")
+
+_active = {}  # request_id → subprocess
+
+def send(obj):
+    print(json.dumps(obj, ensure_ascii=False), flush=True)
+
+def ok(id, result):
+    send({"jsonrpc": "2.0", "id": id, "result": result})
+
+def err(id, code, msg):
+    send({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": msg}})
+
+def notify(id, event):
+    send({"jsonrpc": "2.0", "method": "$/progress", "params": {"id": id, "event": event}})
+
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+def handle_initialize(id, p):
+    ok(id, {
+        "version": "0.1.0",
+        "modes": ["patient", "doctor"],
+        "event_types": ["prefilter", "decompose", "dispatch_start", "dispatch_end",
+                        "synthesize_start", "token", "profile_delta", "run_end"],
+        "methods": ["initialize", "plan", "chat", "session", "memory", "cancel"],
+    })
+
+def handle_plan(id, p):
+    sid  = p.get("session_id", "")
+    msg  = p.get("message", "")
+    mode = p.get("mode", "patient")
+    r = run(["bash", os_sh, "chat", "--session", sid, "--mode", mode, "--dry-run", msg])
+    if r.returncode == 0:
+        try:
+            ok(id, {"ast": json.loads(r.stdout)})
+        except Exception:
+            ok(id, {"ast": None, "raw": r.stdout.strip()})
+    else:
+        err(id, -32000, r.stderr[:300] or "plan failed")
+
+def handle_chat(id, p):
+    sid       = p.get("session_id", "")
+    msg       = p.get("message", "")
+    mode      = p.get("mode", "patient")
+    no_cache  = p.get("no_cache", False)
+
+    cmd = ["bash", os_sh, "chat", "--session", sid, "--mode", mode, "--json"]
+    if no_cache:
+        cmd.append("--no-cache")
+    cmd.append(msg)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    _active[id] = proc
+    final = None
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if event.get("type") == "run_end":
+                    final = event
+                else:
+                    notify(id, event)
+            except Exception:
+                pass
+        proc.wait()
+    finally:
+        _active.pop(id, None)
+
+    if final:
+        ok(id, {
+            "status":   final.get("status", final.get("data", {}).get("status", "ok")),
+            "total_ms": final.get("total_ms", final.get("data", {}).get("total_ms", 0)),
+        })
+    else:
+        err(id, -32000, "no run_end event from chat subprocess")
+
+def handle_session(id, p):
+    verb = p.get("verb", "list")
+    sid  = p.get("session_id", "")
+    mode = p.get("mode", "patient")
+    if verb == "new":
+        cmd = ["bash", os_sh, "session", "new", "--mode", mode]
+        if sid:
+            cmd += ["--session", sid]
+        r = run(cmd)
+        ok(id, {"session_id": r.stdout.strip()})
+    elif verb == "list":
+        r = run(["bash", os_sh, "session", "list"])
+        ok(id, {"output": r.stdout.strip()})
+    elif verb == "history":
+        r = run(["bash", os_sh, "history", "show", "--session", sid])
+        ok(id, {"output": r.stdout.strip()})
+    else:
+        err(id, -32601, f"session/{verb} not supported")
+
+def handle_memory(id, p):
+    verb = p.get("verb", "get")
+    sid  = p.get("session_id", "")
+    if verb == "get":
+        r = run(["bash", os_sh, "memory", "list", "--session", sid])
+        ok(id, {"output": r.stdout.strip()})
+    elif verb == "update":
+        subject = p.get("subject", "")
+        attr    = p.get("attr", "")
+        value   = p.get("value", "")
+        op      = p.get("op", "add")
+        cmd = ["bash", os_sh, "memory", op, "--session", sid,
+               "--subject", subject, "--attr", attr, "--value", value]
+        r = run(cmd)
+        ok(id, {"ok": r.returncode == 0})
+    else:
+        err(id, -32601, f"memory/{verb} not supported")
+
+def handle_cancel(id, p):
+    target = p.get("id", "")
+    proc = _active.get(target)
+    if proc:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        ok(id, {"cancelled": True})
+    else:
+        ok(id, {"cancelled": False})
+
+HANDLERS = {
+    "initialize": handle_initialize,
+    "plan":       handle_plan,
+    "chat":       handle_chat,
+    "session":    handle_session,
+    "memory":     handle_memory,
+    "cancel":     handle_cancel,
+}
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        req = json.loads(raw)
+    except Exception:
+        send({"jsonrpc": "2.0", "id": None,
+              "error": {"code": -32700, "message": "Parse error"}})
+        continue
+
+    rid    = req.get("id")
+    method = req.get("method", "")
+    params = req.get("params") or {}
+
+    handler = HANDLERS.get(method)
+    if not handler:
+        err(rid, -32601, f"Method not found: {method}")
+        continue
+    try:
+        handler(rid, params)
+    except Exception as e:
+        err(rid, -32000, str(e))
+PYEOF
+
+    python3 "$_srv_tmp" "$BASE_DIR" "$OS_DB"
 }
 
 # ════════════════════════════════════════════════════════════════════════════════

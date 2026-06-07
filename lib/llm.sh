@@ -69,3 +69,77 @@ PYEOF
     log_error "llm_call: all $max_retries attempts failed"
     return 1
 }
+
+# ── llm_call_stream(system_prompt, user_content, [temperature]) ──────────────
+# Streams SSE from DeepSeek; emits `token` events for each delta chunk.
+# In CLI (non-JSON) mode, writes deltas directly to /dev/tty so the terminal
+# shows incremental output even when the caller captures stdout.
+# Returns the full accumulated text on stdout (same contract as llm_call).
+# Gate: only called when OS_STREAM=true; callers fall back to llm_call otherwise.
+llm_call_stream() {
+    local system_prompt="$1"
+    local user_content="$2"
+    local temperature="${3:-0}"
+
+    if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+        log_error "llm_call_stream: DEEPSEEK_API_KEY is not set"
+        return 1
+    fi
+
+    local model="${DEEPSEEK_MODEL:-deepseek-v4-flash}"
+    local payload
+    payload=$(python3 - "$system_prompt" "$user_content" "$temperature" "$model" <<'PYEOF'
+import json, sys
+system = sys.argv[1]
+user   = sys.argv[2]
+temp   = float(sys.argv[3])
+model  = sys.argv[4]
+print(json.dumps({
+    "model": model,
+    "temperature": temp,
+    "stream": True,
+    "messages": [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user},
+    ]
+}, ensure_ascii=False))
+PYEOF
+)
+
+    local timeout="${DEEPSEEK_TIMEOUT:-60}"
+    local full_text=""
+
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == ":"* ]] && continue
+        [[ "$line" != "data: "* ]] && continue
+        local data="${line#data: }"
+        [[ "$data" == "[DONE]" ]] && break
+
+        local delta
+        delta=$(python3 -c "
+import json,sys
+try:
+    d=json.loads(sys.argv[1])
+    print(d['choices'][0]['delta'].get('content',''),end='')
+except Exception:
+    pass
+" "$data" 2>/dev/null)
+
+        if [[ -n "$delta" ]]; then
+            full_text="${full_text}${delta}"
+            local delta_json
+            delta_json=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$delta")
+            emit_event "token" "\"delta\":$delta_json"
+            # In plain-CLI mode, write delta directly to terminal (bypasses subshell capture)
+            if [[ "${_JSON_MODE:-false}" == "false" ]]; then
+                printf '%s' "$delta" > /dev/tty 2>/dev/null || true
+            fi
+        fi
+    done < <(curl -sN --max-time "$timeout" \
+        -X POST "https://api.deepseek.com/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -d "$payload" 2>/dev/null)
+
+    echo "$full_text"
+}
