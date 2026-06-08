@@ -85,10 +85,11 @@
     },
     {
       "name": "cache_hit",
-      "desc": "Second identical call hits cache (no dispatch)",
+      "desc": "Identical content in a fresh session hits the global cache (no dispatch)",
       "mode": "patient",
       "message": "高血压患者能吃什么水果？",
       "repeat": 2,
+      "fresh_session_per_repeat": true,
       "expect_cache_hit": true,
       "requires_api": true
     },

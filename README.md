@@ -216,6 +216,8 @@ Example: "高血压、糖尿病、痛风 饮食和用药禁忌" → 3 parallel s
 
 The inner-all adapter caches answers in SQLite keyed by `sha256(question + mode + domains + model)`, invalidated by `OS_KNOWLEDGE_VERSION`. Cache miss: ~16s (full inner-all round-trip). Cache hit: ~3.6s (bash/python3 startup overhead only).
 
+The cache is **global and content-addressed** (no session column), so identical questions from different sessions share answers. Note that `question` is the *dispatched* question: on the single-intent path it includes the prepended profile block, so the key is context-aware. A consequence is that once a session accumulates profile facts, its subsequent questions re-key away from the anonymous cache entries — this is intentional, since a personalized question must not collide with a generic one (e.g. "他能喝咖啡吗" for a hypertensive father vs. a diabetic mother).
+
 ## Adding a new agent
 
 1. Create `registry/adapters/<agent_id>.sh` — receives env vars `INTENT_ID`, `INTENT_MODE`, `INTENT_DOMAINS`, `INTENT_QUESTION`, `RUNDIR`; writes `$RUNDIR/intent_${INTENT_ID}.result.json`

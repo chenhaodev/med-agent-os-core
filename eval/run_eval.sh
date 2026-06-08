@@ -74,6 +74,35 @@ _last_turn_id() {
         "SELECT turn_id FROM turns WHERE session_id='$sid' ORDER BY turn_index DESC LIMIT 1;"
 }
 
+# ── response_cache helpers (deterministic cache-hit assertion) ────────────────
+# Evict any warm entry for a question so the next call is a guaranteed cold miss.
+_cache_evict() {
+    python3 - "$OS_DB" "$1" <<'PYEOF'
+import sqlite3, sys
+db, q = sys.argv[1], sys.argv[2]
+try:
+    conn = sqlite3.connect(db, timeout=5)
+    conn.execute("DELETE FROM response_cache WHERE question=?", (q,))
+    conn.commit(); conn.close()
+except Exception:
+    pass
+PYEOF
+}
+# Max hit_count across cache rows for a question (>=1 proves a later call was served from cache).
+_cache_hits() {
+    python3 - "$OS_DB" "$1" <<'PYEOF'
+import sqlite3, sys
+db, q = sys.argv[1], sys.argv[2]
+try:
+    conn = sqlite3.connect(db, timeout=5)
+    row = conn.execute("SELECT COALESCE(MAX(hit_count),0) FROM response_cache WHERE question=?", (q,)).fetchone()
+    conn.close()
+    print(row[0] if row else 0)
+except Exception:
+    print(0)
+PYEOF
+}
+
 _db_prefilter() { sqlite3 "$OS_DB" "SELECT prefilter FROM turns WHERE turn_id='$1';"; }
 _db_status()    { sqlite3 "$OS_DB" "SELECT status FROM turns WHERE turn_id='$1';"; }
 _db_agent_calls_count() {
@@ -113,9 +142,15 @@ _live_run_scenario() {
     sid=$(bash "$BASE_DIR/os.sh" session new --mode "$mode" 2>/dev/null)
 
     # ── run messages ──────────────────────────────────────────────────────────
-    local is_multi_turn repeat_n has_messages
+    local is_multi_turn repeat_n has_messages fresh_per_repeat
     has_messages=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('true' if 'messages' in d else 'false')" "$sc_json")
     repeat_n=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('repeat',1))" "$sc_json")
+    # The response cache is global and content-addressed, but the single-intent path
+    # prepends the per-session profile block to the dispatched (cache-keyed) question.
+    # So a same-session repeat mutates memory (turn 1 may extract a fact) and the
+    # second call correctly re-keys → miss. To exercise the cache's real purpose
+    # (cross-session dedup of identical content), repeat in fresh sessions.
+    fresh_per_repeat=$(python3 -c "import json,sys; print('true' if json.loads(sys.argv[1]).get('fresh_session_per_repeat') else 'false')" "$sc_json")
 
     local last_reply="" second_reply=""
 
@@ -139,9 +174,19 @@ _live_run_scenario() {
         # single message, possibly repeated
         local msg
         msg=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['message'])" "$sc_json")
+        # For a cache-hit scenario, evict any warm entry so turn 1 is a guaranteed
+        # cold miss — otherwise a previously-cached answer makes turn 1 a hit too and
+        # the assertion can never observe a fresh miss→hit transition.
+        if [[ "$fresh_per_repeat" == "true" ]]; then
+            _cache_evict "$msg"
+        fi
         local rep=0
         local t_first=0 t_second=0
         while [[ $rep -lt $repeat_n ]]; do
+            # optionally use a fresh session per repeat (see fresh_per_repeat note above)
+            if [[ "$fresh_per_repeat" == "true" && $rep -gt 0 ]]; then
+                sid=$(bash "$BASE_DIR/os.sh" session new --mode "$mode" 2>/dev/null)
+            fi
             local t_start; t_start=$(python3 -c "import time; print(int(time.time()*1000))")
             last_reply=$(bash "$BASE_DIR/os.sh" chat --session "$sid" --mode "$mode" "$msg" 2>/dev/null) || true
             local t_end; t_end=$(python3 -c "import time; print(int(time.time()*1000))")
@@ -150,6 +195,8 @@ _live_run_scenario() {
             elif [[ $rep -eq 1 ]]; then
                 t_second=$(( t_end - t_start ))
             fi
+            # let turn 1's backgrounded cache write commit before the next lookup
+            sleep 1.5
             (( rep++ )) || true
         done
     fi
@@ -251,15 +298,17 @@ _live_run_scenario() {
         [[ "$got_st" == "$exp_st" ]] || failures+=("expect_status=$exp_st got=$got_st")
     fi
 
-    # expect_cache_hit: second call should be significantly faster (< 20% of first)
+    # expect_cache_hit: deterministic — turn 1 was evicted (cold miss) and ran in a
+    # fresh empty-profile session, so its dispatched question equals the raw message.
+    # A non-zero hit_count on that cache row proves turn 2 was served from cache.
+    # (Wall-clock timing is logged for context but is too noisy under a live API to gate on.)
     if [[ "${has_messages}" == "false" && "$repeat_n" -ge 2 ]]; then
         local exp_ch
         exp_ch=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('expect_cache_hit',False))" "$sc_json")
-        if [[ "$exp_ch" == "True" && "$t_first" -gt 0 && "$t_second" -gt 0 ]]; then
-            # cache hit should be at least 3x faster
-            local threshold=$(( t_first / 3 ))
-            [[ "$t_second" -lt "$threshold" || "$t_second" -lt 5000 ]] || \
-                failures+=("expect_cache_hit: second=${t_second}ms first=${t_first}ms (not fast enough)")
+        if [[ "$exp_ch" == "True" ]]; then
+            local hits; hits=$(_cache_hits "$msg")
+            [[ "$hits" -ge 1 ]] || \
+                failures+=("expect_cache_hit: hit_count=$hits (turn 2 not served from cache; timing first=${t_first}ms second=${t_second}ms)")
         fi
     fi
 
