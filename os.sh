@@ -21,7 +21,7 @@ _usage() {
 med-agent-os-core v0.1.0
 
 Usage:
-  os.sh chat   --session ID [--mode patient|doctor] [--json] [--no-cache] [--dry-run] "message"
+  os.sh chat   --session ID [--mode patient|doctor] [--json] [--no-cache] [--dry-run] [--stream] "message"
   os.sh plan   --session ID [--mode M] "message"          # decompose only, no dispatch
   os.sh session new|list|show|set|rm|clear|export|purge ...
   os.sh history show|rm|replay ...
@@ -31,12 +31,14 @@ Usage:
   os.sh config  list|get|set|path
   os.sh db      init|migrate|status|vacuum|backup|reset
   os.sh eval    run|list|show ...
+  os.sh serve                                             # stdio JSON-RPC 2.0 daemon
   os.sh version
   os.sh help [COMMAND]
 
 Global flags:
   --db PATH      Use alternate database path
   --json         Emit NDJSON event stream to stdout
+  --stream       Stream synthesis tokens (sets OS_STREAM=true)
   -q, --quiet    Suppress info output
   --verbose      Enable debug logging
   -h, --help     Show help
@@ -53,10 +55,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --db)       _DB_OVERRIDE="$2"; shift 2 ;;
         --json)     _JSON_MODE=true;   shift ;;
+        --stream)   export OS_STREAM=true; shift ;;
         -q|--quiet) _QUIET=true;       shift ;;
         --verbose)  _VERBOSE=true; export OS_VERBOSE=true; shift ;;
         -h|--help)  _usage ;;
         --version)  echo "med-agent-os-core $VERSION"; exit 0 ;;
+        --)         while [[ $# -gt 0 ]]; do _args+=("$1"); shift; done; break ;;
         *)          _args+=("$1");     shift ;;
     esac
 done
@@ -87,9 +91,14 @@ _cmd_chat() {
     local message=""
     local args=("$@")
 
-    local i=0
+    local i=0 end_flags=false
     while [[ $i -lt ${#args[@]} ]]; do
+        if [[ "$end_flags" == "true" ]]; then
+            [[ -z "$message" ]] && message="${args[$i]}"
+            (( i++ )) || true; continue
+        fi
         case "${args[$i]}" in
+            --)        end_flags=true ;;
             --session) (( i++ )) || true; session_id="${args[$i]}" ;;
             --mode)    (( i++ )) || true; mode="${args[$i]}" ;;
             --no-cache) no_cache=true ;;
@@ -135,8 +144,9 @@ conn.execute("""
 conn.commit(); conn.close()
 PYEOF
 
+    local _req_uuid; _req_uuid=$(gen_uuid)
     export OS_SESSION_ID="$session_id"
-    export OS_REQUEST_ID="r-$(gen_uuid)"
+    export OS_REQUEST_ID="r-$_req_uuid"
     export OS_NO_CACHE="$no_cache"
 
     # Anchor fd 3 to current stdout BEFORE any $() captures.
@@ -199,7 +209,8 @@ PYEOF
     fi
 
     # ── stage 3: dispatch ──────────────────────────────────────────────────────
-    local run_id="run-$(gen_uuid)"
+    local run_uuid; run_uuid=$(gen_uuid)
+    local run_id="run-$run_uuid"
     local rundir="$OS_RUNS_DIR/$run_id"
     mkdir -p "$rundir"
 
@@ -263,9 +274,14 @@ _cmd_plan() {
 
     local session_id="" mode="patient" message=""
     local args=("$@")
-    local i=0
+    local i=0 end_flags=false
     while [[ $i -lt ${#args[@]} ]]; do
+        if [[ "$end_flags" == "true" ]]; then
+            [[ -z "$message" ]] && message="${args[$i]}"
+            (( i++ )) || true; continue
+        fi
         case "${args[$i]}" in
+            --)        end_flags=true ;;
             --session) (( i++ )) || true; session_id="${args[$i]}" ;;
             --mode)    (( i++ )) || true; mode="${args[$i]}" ;;
             *)         [[ -z "$message" ]] && message="${args[$i]}" ;;
@@ -276,8 +292,9 @@ _cmd_plan() {
     [[ -z "$message" ]]    && { log_error "plan: message is required"; exit 2; }
     [[ -z "$session_id" ]] && { log_error "plan: --session is required"; exit 2; }
 
+    local _req_uuid; _req_uuid=$(gen_uuid)
     export OS_SESSION_ID="$session_id"
-    export OS_REQUEST_ID="r-$(gen_uuid)"
+    export OS_REQUEST_ID="r-$_req_uuid"
 
     [[ ! -f "$OS_DB" ]] && bash "$BASE_DIR/db/migrate.sh"
 
@@ -297,23 +314,25 @@ _cmd_session() {
 
     case "$action" in
         new)
-            local mode="patient" title=""
+            local mode="patient" title="" sid_arg=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --mode)  shift; mode="$1" ;;
-                    --title) shift; title="$1" ;;
+                    --mode)    shift; mode="$1" ;;
+                    --title)   shift; title="$1" ;;
+                    --session) shift; sid_arg="$1" ;;
                 esac
                 shift
             done
-            python3 - "$OS_DB" "$mode" "$title" <<'PYEOF'
+            python3 - "$OS_DB" "$mode" "$title" "$sid_arg" <<'PYEOF'
 import sqlite3, sys, uuid
 from datetime import datetime, timezone
-db,mode,title = sys.argv[1], sys.argv[2], sys.argv[3]
-sid  = str(uuid.uuid4())
+db,mode,title,sid_arg = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+sid  = sid_arg or str(uuid.uuid4())
 now  = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]+"Z"
 title= title or sid[:8]
 conn = sqlite3.connect(db); conn.execute("PRAGMA foreign_keys=ON")
-conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", (sid,title,mode,now,now))
+# INSERT OR IGNORE so a client-supplied id is idempotent (already-existing → no-op)
+conn.execute("INSERT OR IGNORE INTO sessions VALUES (?,?,?,?,?)", (sid,title,mode,now,now))
 conn.commit(); conn.close()
 print(sid)
 PYEOF
@@ -678,12 +697,14 @@ PYEOF
             rm -rf "$RUNDIR"
             ;;
         validate)
-            local ok=true
             log_info "Validating agent registry..."
+            # python exits 1 if any adapter/domains_file is missing → propagates as
+            # the command's exit code so callers/CI can detect a broken registry.
             python3 - "$BASE_DIR/registry/agents.json" "$BASE_DIR" <<'PYEOF'
 import json, os, sys
 d = json.load(open(sys.argv[1]))
 base = sys.argv[2]
+any_fail = False
 for a in d["agents"]:
     adapter = os.path.join(base, "registry", a["adapter"])
     df = os.path.join(base, "registry", a.get("domains_file",""))
@@ -691,7 +712,9 @@ for a in d["agents"]:
     if not os.path.exists(adapter): issues.append(f"adapter missing: {adapter}")
     if a.get("domains_file") and not os.path.exists(df): issues.append(f"domains_file missing: {df}")
     status = "OK" if not issues else "FAIL"
+    if issues: any_fail = True
     print(f"{status}  {a['id']}: " + ("; ".join(issues) if issues else "adapter+domains OK"))
+sys.exit(1 if any_fail else 0)
 PYEOF
             ;;
         set)
@@ -804,11 +827,26 @@ _cmd_config() {
         set)
             local key="${1:-}" val="${2:-}"
             [[ -z "$key" ]] && { log_error "config set: KEY VALUE required"; exit 2; }
-            if [[ -f "$BASE_DIR/.env" ]] && grep -q "^${key}=" "$BASE_DIR/.env"; then
-                sed -i.bak "s|^${key}=.*|${key}=${val}|" "$BASE_DIR/.env"
-            else
-                echo "${key}=${val}" >> "$BASE_DIR/.env"
-            fi
+            # Rewrite via temp file + atomic replace. Avoids `sed -i.bak`, which
+            # would leave an untracked .env.bak copy of the secret on disk, and
+            # is safe for values containing sed-special chars (|, &, etc.).
+            python3 - "$BASE_DIR/.env" "$key" "$val" <<'PYEOF'
+import os, sys
+path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(path).read().splitlines() if os.path.exists(path) else []
+out, found = [], False
+for ln in lines:
+    if ln.startswith(key + "="):
+        out.append(f"{key}={val}"); found = True
+    else:
+        out.append(ln)
+if not found:
+    out.append(f"{key}={val}")
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    f.write("\n".join(out) + "\n")
+os.replace(tmp, path)
+PYEOF
             echo "ok"
             ;;
         path)
@@ -881,9 +919,14 @@ _cmd_eval() {
 _cmd_serve() {
     [[ ! -f "$OS_DB" ]] && bash "$BASE_DIR/db/migrate.sh" >&2
 
-    # Write serve loop to a temp file so python3's stdin stays connected to the caller
+    # Write serve loop to a temp file so python3's stdin stays connected to the caller.
+    # Template keeps the X's trailing — a ".py" suffix after them defeats BSD/macOS
+    # mktemp substitution (it would create a literal, colliding file).
     local _srv_tmp
-    _srv_tmp=$(mktemp /tmp/os_serve_XXXXXX.py)
+    _srv_tmp=$(mktemp "${TMPDIR:-/tmp}/os_serve_XXXXXX")
+    # Expand $_srv_tmp now (at trap registration), not at signal time: this is a
+    # function-local that is out of scope when the EXIT trap fires.
+    # shellcheck disable=SC2064
     trap "rm -f '$_srv_tmp'" EXIT INT TERM
 
     cat > "$_srv_tmp" <<'PYEOF'
@@ -1064,8 +1107,6 @@ PYEOF
 # ════════════════════════════════════════════════════════════════════════════════
 # Route to subcommand
 # ════════════════════════════════════════════════════════════════════════════════
-_r() { [[ ${#rest[@]} -gt 0 ]] && printf '%s\0' "${rest[@]}" | xargs -0 "$@" || "$@"; }
-
 case "$resource" in
     chat)    _cmd_chat    "$verb" ${rest[@]+"${rest[@]}"} ;;
     plan)    _cmd_plan    "$verb" ${rest[@]+"${rest[@]}"} ;;

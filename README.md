@@ -27,9 +27,9 @@ os.sh chat --session S --mode M "message"
       └─ persist     (parent-only single-writer; async after reply delivered)
 ```
 
-**Single-intent fast-path**: when the decompose gate classifies the message as single-intent, decompose LLM and synthesize LLM are both skipped — the answer passes through directly. Zero extra API calls beyond the one inner-all call.
+**Single-intent fast-path**: when the decompose gate classifies the message as single-intent, decompose LLM and synthesize LLM are both skipped — the answer passes through directly. Zero extra API calls beyond the one inner-all call. The durable profile block is still prepended to the dispatched question (deterministically, no LLM) so the stateless agent keeps multi-turn memory.
 
-**Decompose gate**: only calls the decompose LLM when multi-intent is suspected (conjunctions 另外/还有/以及…, multiple `？`, or pronoun + existing profile facts). Otherwise routes as single-intent.
+**Decompose gate**: only calls the decompose LLM when multi-intent is suspected (conjunctions 另外/还有/以及…, multiple `？`, or a pronoun with existing context — profile facts or prior history). Otherwise routes as single-intent.
 
 **Bounded fan-out**: `OS_MAX_WORKERS=3` caps parallel inner-all calls to avoid 429 thundering herd.
 
@@ -68,8 +68,9 @@ med-agent-os-core/
 │   └── migrate.sh
 ├── schema/ast.schema.json       # JSON Schema for Request AST + NodeResult
 ├── eval/
-│   ├── scenarios.yaml           # 13 test scenarios (mock + live)
-│   ├── run_eval.sh              # --mock (zero API) or --live --limit N
+│   ├── scenarios.json           # 12 live scenarios (consumed by run_eval.sh --live)
+│   ├── scenarios.yaml           # human-readable reference mirror (not parsed)
+│   ├── run_eval.sh              # --mock (zero API, 12 cases) or --live --limit N
 │   ├── test_unwrap.sh           # 9 unit tests for unwrap.sh
 │   └── mock/                    # Canned adapter + fixtures for --mock mode
 └── var/                         # gitignored: os.db, runs/, logs/
@@ -86,6 +87,11 @@ bash os.sh db init
 
 Requires: bash 3.2+, python3, curl, sqlite3. No external packages.
 
+> **Two `.env` files for live mode.** This kernel's `.env` powers the decompose/synthesize
+> LLM calls. The dispatched agent (`med-agent-inner-all`) is a separate project with its
+> **own** `.env` — set `DEEPSEEK_API_KEY` there too, or `bin/ask.sh` calls will fail and
+> sub-intents return `status:error`. `--mock` eval needs neither key.
+
 ## Usage
 
 ### Chat
@@ -100,12 +106,24 @@ bash os.sh chat --session "$SID" --mode doctor "高血压合并CKD3期，ACEI和
 # preview intent decomposition without dispatching
 bash os.sh plan --session "$SID" --mode patient "我爸有高血压、糖尿病、还有痛风，饮食注意和用药禁忌？"
 
+# decompose only, print AST, no dispatch (same as plan, via chat)
+bash os.sh chat --session "$SID" --dry-run "高血压、糖尿病饮食注意？"
+
 # skip cache for this call
 bash os.sh chat --session "$SID" --no-cache "高血压能喝咖啡吗？"
 
 # structured NDJSON event stream (for ui-core)
 bash os.sh chat --session "$SID" --json "..."
+
+# stream synthesis tokens to the terminal
+bash os.sh chat --session "$SID" --stream "高血压、糖尿病的饮食和用药注意？"
+
+# use an alternate database
+bash os.sh --db /tmp/test.db chat --session "$SID" "..."
 ```
+
+Global flags (before the subcommand or anywhere): `--json`, `--stream`, `--db PATH`,
+`-q/--quiet`, `--verbose`. Use `--` to end flag parsing when a message starts with `-`.
 
 ### Session management
 
@@ -171,8 +189,8 @@ bash os.sh db vacuum
 ### Eval
 
 ```bash
-bash os.sh eval run --mock            # zero-API, 6 scenarios
-bash os.sh eval run --live --limit 3  # real API, up to 3 scenarios
+bash os.sh eval run --mock            # zero-API, 12 scenarios (functional + contract)
+bash os.sh eval run --live --limit 3  # real API, up to 3 of 12 scenarios.json
 bash eval/test_unwrap.sh              # 9 unit tests for unwrap.sh
 ```
 
@@ -221,10 +239,33 @@ Pass `--json` to get one JSON object per line on stdout:
 
 Schema defined in `schema/ast.schema.json`.
 
+### Token streaming
+
+Pass `--stream` (or set `OS_STREAM=true`) to stream synthesis tokens. In `--json`
+mode each delta is emitted as a `token` event (`{"type":"token","delta":"..."}`); in
+plain CLI mode deltas are written incrementally to the terminal. Streaming only applies
+to the multi-intent LLM synthesis step (the single-intent fast-path has no LLM call).
+
+## JSON-RPC daemon (`os.sh serve`)
+
+`os.sh serve` is a stdio JSON-RPC 2.0 daemon: one request object per line in, one
+response object per line out. Streaming events are delivered as `$/progress`
+notifications carrying the same NDJSON event objects.
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"chat","params":{"session_id":"S","mode":"patient","message":"高血压能喝酒吗？"}}' \
+  | bash os.sh serve
+```
+
+Methods: `initialize` (returns version + capabilities), `plan` (decompose only),
+`chat` (full pipeline, progress-streamed), `session` (`verb`: new/list/history —
+`new` accepts an optional `session_id`), `memory` (`verb`: get/update), `cancel`
+(by request id). Timeout per chat: `OS_SERVE_TIMEOUT` seconds (default 120).
+
 ## Out of scope (MVP)
 
-- LSP JSON-RPC daemon (`os.sh serve` — schema locked, implementation deferred)
-- Token streaming (event hook `token` type is reserved)
 - Other `med-agent-*` agents (only `inner_all` registered; add via adapter)
 - AST sequence/DAG execution (grammar supports it, executor not built)
 - Cross-session or multi-user concurrency

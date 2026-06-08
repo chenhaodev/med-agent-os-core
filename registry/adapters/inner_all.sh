@@ -162,7 +162,17 @@ else
     case "$unwrap_status" in
         ok)    status="ok" ;;
         oob)   status="oob" ;;
-        *)     status="error" ;;
+        *)
+            # parse_error/empty: ask.sh exited cleanly (ec==0 in this branch) but
+            # produced no ═══ fence. Rather than silently drop a real answer, fall
+            # back to the trimmed raw output when it is non-empty.
+            if [[ -n "${raw_stdout//[[:space:]]/}" ]]; then
+                status="ok"
+                answer=$(printf '%s' "$raw_stdout" | python3 -c "import sys; print(sys.stdin.read().strip())")
+            else
+                status="error"; answer=""
+            fi
+            ;;
     esac
 fi
 

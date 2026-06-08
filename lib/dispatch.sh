@@ -13,14 +13,28 @@ dispatch_intent() {
     local node_json="$1"
     local rundir="$2"
 
-    local intent_id mode question agent_id domains_json domains_str
+    local intent_id mode question agent_id domains_str
 
-    intent_id=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['id'])" "$node_json")
-    mode=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['mode'])" "$node_json")
-    question=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['question'])" "$node_json")
-    agent_id=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('agent','inner_all'))" "$node_json")
-    domains_json=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(json.dumps(d.get('domains',[])))" "$node_json")
-    domains_str=$(python3 -c "import json,sys; print(' '.join(json.loads(sys.argv[1])))" "$domains_json")
+    # Extract all node fields in a single python invocation (NUL-delimited so the
+    # question field can safely contain newlines from an injected context block).
+    {
+        IFS= read -r -d '' intent_id
+        IFS= read -r -d '' mode
+        IFS= read -r -d '' question
+        IFS= read -r -d '' agent_id
+        IFS= read -r -d '' domains_str
+    } < <(python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+fields = [
+    str(d['id']),
+    d.get('mode', 'patient'),
+    d.get('question', ''),
+    d.get('agent', 'inner_all'),
+    ' '.join(d.get('domains', [])),
+]
+sys.stdout.write('\0'.join(fields) + '\0')
+" "$node_json")
 
     # agent=none means the OS handles this node directly (oob/chitchat/meta)
     if [[ "$agent_id" == "none" ]]; then

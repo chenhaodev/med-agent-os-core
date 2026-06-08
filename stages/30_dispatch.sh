@@ -28,12 +28,13 @@ dispatch_all() {
 
     if [[ $node_count -eq 1 ]]; then
         # single-intent fast-path: run inline (no subprocess overhead)
-        local node_json
-        node_json=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(json.dumps(d[0]))" "$nodes_json")
-        local iid agent_id domains_json
-        iid=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$node_json")
-        agent_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('agent','inner_all'))" "$node_json")
-        domains_json=$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1]).get('domains',[])))" "$node_json")
+        local node_json iid agent_id domains_json
+        # Extract node[0] + its id/agent/domains in one python call.
+        IFS=$'\t' read -r node_json iid agent_id domains_json < <(python3 -c "
+import json, sys
+n = json.loads(sys.argv[1])[0]
+print('\t'.join([json.dumps(n), str(n['id']), n.get('agent','inner_all'), json.dumps(n.get('domains',[]))]))
+" "$nodes_json")
         emit_event "dispatch_start" "\"intent_id\":\"$iid\",\"agent_id\":\"$agent_id\",\"domains\":$domains_json"
         dispatch_intent "$node_json" "$rundir"
         local rf="$rundir/intent_${iid}.result.json"
@@ -52,26 +53,20 @@ except Exception:
         fi
         emit_event "dispatch_end" "\"intent_id\":\"$iid\",\"agent_id\":\"$agent_id\",\"status\":\"$d_status\",\"ms\":$d_ms"
     else
-        # bounded fan-out — emit per-node start events then parallel dispatch
-        while IFS= read -r node_j; do
-            local iid agent_id domains_json
-            iid=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$node_j")
-            agent_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('agent','inner_all'))" "$node_j")
-            domains_json=$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1]).get('domains',[])))" "$node_j")
+        # bounded fan-out — emit per-node start events then parallel dispatch.
+        # One python call streams "id<TAB>agent<TAB>domains_json" per node.
+        while IFS=$'\t' read -r iid agent_id domains_json; do
             emit_event "dispatch_start" "\"intent_id\":\"$iid\",\"agent_id\":\"$agent_id\",\"domains\":$domains_json"
         done < <(python3 -c "
 import json,sys
-nodes=json.loads(sys.argv[1])
-for n in nodes: print(json.dumps(n))
+for n in json.loads(sys.argv[1]):
+    print('\t'.join([str(n['id']), n.get('agent','inner_all'), json.dumps(n.get('domains',[]))]))
 " "$nodes_json")
 
         bounded_fanout "$nodes_json" "$rundir" "$OS_MAX_WORKERS"
 
         # emit dispatch_end per node after all workers complete
-        while IFS= read -r node_j; do
-            local iid agent_id
-            iid=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$node_j")
-            agent_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('agent','inner_all'))" "$node_j")
+        while IFS=$'\t' read -r iid agent_id; do
             local rf="$rundir/intent_${iid}.result.json"
             local d_status d_ms
             if [[ -f "$rf" ]]; then
@@ -89,8 +84,8 @@ except Exception:
             emit_event "dispatch_end" "\"intent_id\":\"$iid\",\"agent_id\":\"$agent_id\",\"status\":\"$d_status\",\"ms\":$d_ms"
         done < <(python3 -c "
 import json,sys
-nodes=json.loads(sys.argv[1])
-for n in nodes: print(json.dumps(n))
+for n in json.loads(sys.argv[1]):
+    print('\t'.join([str(n['id']), n.get('agent','inner_all')]))
 " "$nodes_json")
     fi
 

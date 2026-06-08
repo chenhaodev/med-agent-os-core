@@ -291,7 +291,7 @@ if [[ "$MODE" == "mock" ]]; then
     if [[ -z "$SCENARIO" || "$SCENARIO" == "single_intent" ]]; then
         SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
         run_case "single_intent_dispatch" "$SID" "patient" \
-            "高血压患者饮食要注意什么？" "ok" "模拟回答"
+            "高血压患者饮食要注意什么？" "ok" "测试回答"
     fi
 
     if [[ -z "$SCENARIO" || "$SCENARIO" == "persist_turn" ]]; then
@@ -321,6 +321,28 @@ if [[ "$MODE" == "mock" ]]; then
         fi
     fi
 
+    if [[ -z "$SCENARIO" || "$SCENARIO" == "single_intent_memory_inject" ]]; then
+        # §3 regression: a single-intent follow-up (no pronoun → stays single,
+        # no LLM) must still carry the durable profile facts to the stateless agent.
+        SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
+        bash "$BASE_DIR/os.sh" memory add --session "$SID" \
+            --subject "爸爸" --attr "disease" --value "高血压" > /dev/null
+        ast=$(bash "$BASE_DIR/os.sh" chat --session "$SID" --mode patient \
+            --dry-run "饮食上要注意什么？" 2>/dev/null)
+        injected=$(echo "$ast" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+nodes=d.get('plan',{}).get('nodes',[])
+q=nodes[0].get('question','') if nodes else ''
+print('yes' if (len(nodes)==1 and '高血压' in q) else 'no')
+" 2>/dev/null || echo "no")
+        if [[ "$injected" == "yes" ]]; then
+            _pass "single_intent_memory_inject (profile reaches single-intent question)"
+        else
+            _fail "single_intent_memory_inject" "profile block not injected into single-intent node question"
+        fi
+    fi
+
     if [[ -z "$SCENARIO" || "$SCENARIO" == "unwrap_fallback" ]]; then
         SID=$(bash "$BASE_DIR/os.sh" session new --mode patient)
         cat > /tmp/no_fence_fixture.txt <<'EOF'
@@ -332,9 +354,14 @@ EOF
         fi
         cp /tmp/no_fence_fixture.txt "$SCRIPT_DIR/mock/fixtures/i1.txt"
 
-        bash "$BASE_DIR/os.sh" chat --session "$SID" --mode patient \
-            "高血压能喝酒吗？" 2>/dev/null || true
-        _pass "unwrap_fallback (pipeline did not crash)"
+        uf_reply=$(bash "$BASE_DIR/os.sh" chat --session "$SID" --mode patient \
+            "高血压能喝酒吗？" 2>/dev/null || true)
+        # Fence-less but non-empty agent output must be preserved, not dropped.
+        if [[ "$uf_reply" == *"without any fence"* ]]; then
+            _pass "unwrap_fallback (fence-less answer preserved)"
+        else
+            _fail "unwrap_fallback" "fence-less answer dropped; reply=$(echo "$uf_reply" | head -c 80)"
+        fi
 
         if [[ -n "$FIXTURE_BACKUP" ]]; then
             echo "$FIXTURE_BACKUP" > "$SCRIPT_DIR/mock/fixtures/i1.txt"

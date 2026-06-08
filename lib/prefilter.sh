@@ -28,32 +28,37 @@ _MEDICAL_SIGNALS=(
 prefilter_message() {
     local msg="$1"
 
-    for pattern in "${_CHITCHAT_PATTERNS[@]}"; do
-        if [[ "$msg" == *"$pattern"* ]]; then
-            echo "chitchat"
+    # 1. Any medical signal → always pass. A real medical question must never be
+    #    blocked, even when it also contains a chitchat/OOB keyword as a substring
+    #    (e.g. "这个药对肝有帮助吗？" contains the chitchat word 帮助; "翻译化验单"
+    #    contains the OOB word 翻译). Checking signals first prevents those
+    #    false-positives that the previous keyword-first ordering produced.
+    for signal in "${_MEDICAL_SIGNALS[@]}"; do
+        if [[ "$msg" == *"$signal"* ]]; then
+            echo "pass"
             return 0
         fi
     done
 
-    local has_oob=false
-    for pattern in "${_OOB_PATTERNS[@]}"; do
-        if [[ "$msg" == *"$pattern"* ]]; then
-            has_oob=true
-            break
-        fi
-    done
-
-    if [[ "$has_oob" == "true" ]]; then
-        # Only block if no medical signal present — mixed messages go to decompose
-        for signal in "${_MEDICAL_SIGNALS[@]}"; do
-            if [[ "$msg" == *"$signal"* ]]; then
-                echo "pass"
+    # 2. Chitchat — only for short, non-medical messages. The keywords are short
+    #    common words; restricting to short messages avoids matching them inside a
+    #    longer substantive (but non-medical) request.
+    if [[ ${#msg} -le 30 ]]; then
+        for pattern in "${_CHITCHAT_PATTERNS[@]}"; do
+            if [[ "$msg" == *"$pattern"* ]]; then
+                echo "chitchat"
                 return 0
             fi
         done
-        echo "oob"
-        return 0
     fi
+
+    # 3. Out-of-band non-medical topics (no medical signal was found above).
+    for pattern in "${_OOB_PATTERNS[@]}"; do
+        if [[ "$msg" == *"$pattern"* ]]; then
+            echo "oob"
+            return 0
+        fi
+    done
 
     echo "pass"
 }

@@ -14,7 +14,11 @@ source "$BASE_DIR/lib/common.sh"
 source "$BASE_DIR/lib/unwrap.sh"
 
 FENCE="═══════════════════════════════════════════════════════"
-FIXTURES_DIR="$SCRIPT_DIR/fixtures"
+# Anchor to the repo's fixtures dir, not $SCRIPT_DIR — the eval harness copies this
+# adapter into registry/adapters/, so $SCRIPT_DIR/fixtures would not exist and the
+# canned fixtures would be silently skipped. BASE_DIR resolves to the repo root from
+# either location (eval/mock/../.. or registry/adapters/../..).
+FIXTURES_DIR="$BASE_DIR/eval/mock/fixtures"
 
 result_file="$RUNDIR/intent_${INTENT_ID}.result.json"
 
@@ -48,7 +52,16 @@ answer=$(echo "$unwrap_out" | tail -n +2)
 case "$unwrap_status" in
     ok)           status="ok" ;;
     oob)          status="oob" ;;
-    *)            status="error" ;;
+    *)
+        # Mirror adapters/inner_all.sh: fence-less but non-empty output is kept
+        # as the answer rather than silently dropped.
+        if [[ -n "${raw_stdout//[[:space:]]/}" ]]; then
+            status="ok"
+            answer=$(printf '%s' "$raw_stdout" | python3 -c "import sys; print(sys.stdin.read().strip())")
+        else
+            status="error"; answer=""
+        fi
+        ;;
 esac
 
 python3 - "$INTENT_ID" "$status" "$answer" "$elapsed" > "$result_file" <<'PYEOF'

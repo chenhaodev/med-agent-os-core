@@ -18,12 +18,14 @@ source "$BASE_DIR/lib/events.sh"
 _intent_gate() {
     local msg="$1"
     local has_profile="${2:-false}"  # true if profile_facts exist
+    local has_history="${3:-false}"  # true if prior conversation turns exist
 
-    python3 - "$msg" "$has_profile" <<'PYEOF'
+    python3 - "$msg" "$has_profile" "$has_history" <<'PYEOF'
 import sys, re
 
-msg        = sys.argv[1]
+msg         = sys.argv[1]
 has_profile = sys.argv[2] == "true"
+has_history = sys.argv[3] == "true"
 
 CONJUNCTIONS = ["另外", "还有", "还想问", "以及", "同时", "此外", "顺便问",
                 "另，", "另，", "？还", "?还"]
@@ -40,8 +42,10 @@ if msg.count("？") >= 2 or msg.count("?") >= 2:
     print("multi")
     sys.exit(0)
 
-# pronoun + has profile → need co-ref resolution → send to decompose
-if has_profile and any(p in msg for p in PRONOUNS):
+# pronoun + context (profile facts OR prior history) → need co-ref resolution.
+# The antecedent may live only in conversation history, not as an extracted fact,
+# so history alone is enough to route to the LLM decompose path.
+if (has_profile or has_history) and any(p in msg for p in PRONOUNS):
     print("multi")
     sys.exit(0)
 
@@ -50,6 +54,12 @@ PYEOF
 }
 
 # ── build single-intent AST without LLM ──────────────────────────────────────
+# The node question is made self-contained for the stateless agent by prepending
+# the durable profile block (extracted facts). This keeps multi-turn memory on the
+# common single-intent fast-path without an extra LLM call. Pronoun/co-ref cases
+# escalate to the LLM decompose path via _intent_gate, so we only inject the stable
+# profile here (not volatile history) — that also keeps the response cache key
+# stable for generic questions.
 _single_intent_ast() {
     local request_id="$1"
     local session_id="$2"
@@ -57,9 +67,10 @@ _single_intent_ast() {
     local message="$4"
     local history_turns="${5:-0}"
     local profile_facts="${6:-0}"
+    local context_json="${7:-}"
 
     python3 - "$request_id" "$session_id" "$mode" "$message" \
-              "$history_turns" "$profile_facts" <<'PYEOF'
+              "$history_turns" "$profile_facts" "$context_json" <<'PYEOF'
 import json, sys
 
 request_id    = sys.argv[1]
@@ -68,6 +79,17 @@ mode          = sys.argv[3]
 message       = sys.argv[4]
 history_turns = int(sys.argv[5])
 profile_facts = int(sys.argv[6])
+context_json  = sys.argv[7] if len(sys.argv) > 7 else ""
+
+# Make the question self-contained: prepend the profile block when facts exist.
+question = message
+if context_json:
+    try:
+        profile_block = json.loads(context_json).get("profile_block", "")
+    except Exception:
+        profile_block = ""
+    if profile_block:
+        question = f"{profile_block}\n\n【当前问题】\n{message}"
 
 ast = {
     "v": 1,
@@ -83,7 +105,7 @@ ast = {
             "kind": "medical_query",
             "agent": "inner_all",
             "mode": mode,
-            "question": message,
+            "question": question,
             "domains": [],   # empty → adapter falls back to router
             "subject": "",
             "depends_on": [],
@@ -205,16 +227,17 @@ decompose() {
     local history_turns profile_count
     history_turns=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('history',[])))" "$context_json")
     profile_count=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('profile_facts',[])))" "$context_json")
-    local has_profile
+    local has_profile has_history
     has_profile=$([[ $profile_count -gt 0 ]] && echo "true" || echo "false")
+    has_history=$([[ $history_turns -gt 0 ]] && echo "true" || echo "false")
 
     local gate_result
-    gate_result=$(_intent_gate "$message" "$has_profile")
+    gate_result=$(_intent_gate "$message" "$has_profile" "$has_history")
 
     if [[ "$gate_result" == "single" ]]; then
         log_debug "decompose: gate=single, skipping LLM"
         _single_intent_ast "$request_id" "$session_id" "$mode" "$message" \
-                            "$history_turns" "$profile_count"
+                            "$history_turns" "$profile_count" "$context_json"
         return 0
     fi
 
@@ -233,6 +256,6 @@ print(json.dumps(d,ensure_ascii=False))
     else
         log_warn "decompose: LLM failed, falling back to single-intent"
         _single_intent_ast "$request_id" "$session_id" "$mode" "$message" \
-                            "$history_turns" "$profile_count"
+                            "$history_turns" "$profile_count" "$context_json"
     fi
 }

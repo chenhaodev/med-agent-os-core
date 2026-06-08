@@ -1,6 +1,10 @@
 var/
 .env
+.env.bak
+*.bak
+*.tmp
 *.swp
 *.orig
 __pycache__/
 *.pyc
+registry/adapters/*.eval_backup
